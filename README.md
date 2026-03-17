@@ -17,7 +17,7 @@ The script uses two complementary detection methods:
 
 **Fetch Interception** -- Hooks into `window.fetch` to inspect X's GraphQL API responses before they reach the page. When a response contains `relationship_perspectives.blocked_by: true` for a user, that user is added to a session-local blocklist. This is the primary and most reliable detection method.
 
-**DOM Fallback** -- As a backup, the script examines rendered tweets for a telltale DOM pattern: when both the retweet and share buttons are disabled on a tweet, the author has blocked you. (Your own tweets only disable retweet, so checking both avoids false positives.)
+**DOM Fallback** -- As a backup, the script examines rendered tweets for a telltale DOM pattern: when both the retweet and share buttons are disabled, AND the tweet does not display a lock icon (protected account indicator), the author has blocked you. Protected/locked accounts also disable retweet and share in the DOM, so the lock icon check is necessary to avoid false positives.
 
 New tweets are caught as they render via a `MutationObserver`. When a new blocked user is discovered through the API, any already-visible tweets from that user are retroactively hidden.
 

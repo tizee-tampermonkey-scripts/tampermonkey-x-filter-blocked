@@ -24,9 +24,9 @@ Hooks `window.fetch` **before X's own scripts load** (`@run-at document-start`) 
 
 Discovered users are cached in a session-local `Map<rest_id, screen_name>` (`blockedByUsers`).
 
-### DOM Fallback (Layer 2, lines 150-195)
+### DOM Fallback (Layer 2)
 
-For tweets that slip through (e.g., already rendered before fetch interception fires), checks the rendered DOM: if **both** the retweet and share buttons are disabled on a tweet, it's from a user who blocked you. Requires both to avoid false positives (your own tweets only disable retweet).
+For tweets that slip through (e.g., already rendered before fetch interception fires), checks whether **both retweet and share buttons are disabled** AND the tweet **does not have a lock icon** (`data-testid="icon-lock"`). The lock icon exclusion is critical: protected/locked accounts also disable retweet + share in the DOM, but they display a lock icon next to the username. Note: X does NOT use HTML `disabled` on the like button for blocked-by — it uses JS event interception instead, so the like button cannot be used as a DOM-level discriminator.
 
 ### Processing Pipeline
 

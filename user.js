@@ -1,16 +1,17 @@
 // ==UserScript==
 // @name         X Block Filter
-// @namespace    https://github.com/tizee-tampermonkey-scripts
-// @version      1.0.0
-// @description  Automatically hides tweets from users who have blocked you on X/Twitter.
-//               Detects blocked-by status via fetch interception (GraphQL response) and
-//               DOM fallback (disabled action buttons). Maintains a session-local blocklist.
+// @namespace    https://github.com/tizee-tampermonkey-scripts/tampermonkey-x-filter-blocked
+// @version      1.1.0
+// @description  Automatically hides tweets from users who have blocked you on X/Twitter. Detects blocked-by status via fetch interception (GraphQL response) and DOM fallback (disabled action buttons). Maintains a session-local blocklist.
 // @author       tizee
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=x.com
+// @downloadURL  https://raw.githubusercontent.com/tizee-tampermonkey-scripts/tampermonkey-x-filter-blocked/refs/heads/main/user.js
+// @updateURL    https://raw.githubusercontent.com/tizee-tampermonkey-scripts/tampermonkey-x-filter-blocked/refs/heads/main/user.js
 // @match        https://x.com/*
 // @grant        GM_addStyle
 // @grant        GM_registerMenuCommand
 // @run-at       document-start
+// @license      MIT
 // ==/UserScript==
 
 (function () {
@@ -96,11 +97,28 @@
     };
 
     /**
+     * Checks whether limitedActionResults contains a "Like" action restriction,
+     * which is the definitive blocked-by signal. Protected accounts restrict
+     * retweet/share but NOT like.
+     * @param {object} limitedActionResults
+     * @returns {boolean}
+     */
+    function hasLikeRestriction(limitedActionResults) {
+        const actions = limitedActionResults?.limited_actions;
+        if (!Array.isArray(actions)) return false;
+        return actions.some(a => a.action === 'Like');
+    }
+
+    /**
      * Recursively walks a GraphQL response object looking for tweet results
-     * that carry the "blocked_by" signal. Two independent signals are checked:
+     * that carry the "blocked_by" signal. Three independent signals are checked:
      *
-     * 1. __typename === "TweetWithVisibilityResults" with limitedActionResults
-     * 2. relationship_perspectives.blocked_by === true in the user object
+     * 1. __typename === "TweetWithVisibilityResults" with a "Like" action in
+     *    limitedActionResults (most reliable — blocked-by restricts Like,
+     *    protected accounts do not)
+     * 2. __typename === "TweetWithVisibilityResults" with
+     *    relationship_perspectives.blocked_by === true
+     * 3. relationship_perspectives.blocked_by === true on any user object
      *
      * When found, the user's rest_id and screen_name are added to blockedByUsers.
      */
@@ -112,13 +130,17 @@
         if (obj.__typename === 'TweetWithVisibilityResults' && obj.tweet) {
             const user = obj.tweet?.core?.user_results?.result;
             if (user) {
-                const perspectives = user.relationship_perspectives;
-                if (perspectives?.blocked_by === true) {
+                // Primary signal: Like action is restricted (blocked-by only).
+                // Secondary signal: relationship_perspectives.blocked_by flag.
+                const likeRestricted = hasLikeRestriction(obj.limitedActionResults);
+                const blockedBy = user.relationship_perspectives?.blocked_by === true;
+
+                if (likeRestricted || blockedBy) {
                     const id = user.rest_id;
                     const name = user.core?.screen_name || user.legacy?.screen_name || 'unknown';
                     if (!blockedByUsers.has(id)) {
                         blockedByUsers.set(id, name);
-                        log(`Discovered blocked-by user: @${name} (${id})`);
+                        log(`Discovered blocked-by user: @${name} (${id}) [like_restricted=${likeRestricted}, blocked_by=${blockedBy}]`);
                         // Immediately try to hide any already-rendered tweets from this user.
                         hideExistingTweetsFromUser(name);
                     }
@@ -151,18 +173,20 @@
 
     // ─── Layer 2: DOM-Based Detection ────────────────────────────────────────────
     // Fallback detection that examines rendered tweet DOM for the disabled button
-    // pattern. A tweet from someone who blocked you will have BOTH the retweet
-    // and share buttons set to aria-disabled="true" / disabled="".
+    // pattern. Both blocked-by and protected accounts disable retweet + share in
+    // the DOM (like button is NOT disabled in either case — X uses JS event
+    // interception for blocked-by like restriction, not HTML attributes).
     //
-    // We intentionally require BOTH to be disabled to avoid false positives:
-    //   - Your own tweets: retweet is disabled, but share is NOT
-    //   - Protected/locked accounts: extremely rare in timeline, and typically
-    //     only retweet is disabled
-    //   - Blocked-by tweets: retweet AND share are both disabled
+    // To distinguish:
+    //   - Protected/locked accounts have a lock icon (data-testid="icon-lock")
+    //     next to the username
+    //   - Blocked-by tweets do NOT have the lock icon
+    //
+    // Detection: retweet disabled AND share disabled AND no icon-lock present.
 
     /**
      * Checks whether a tweet article element belongs to a user who blocked you,
-     * using DOM signals (disabled action buttons).
+     * using DOM signals (disabled action buttons + absence of lock icon).
      * @param {HTMLElement} article - An article[data-testid="tweet"] element.
      * @returns {boolean}
      */
@@ -170,7 +194,6 @@
         const retweetBtn = article.querySelector('button[data-testid="retweet"]');
         const shareBtn = article.querySelector('button[aria-label="Share post"]');
 
-        // Both must exist and both must be disabled.
         if (!retweetBtn || !shareBtn) return false;
 
         const retweetDisabled = retweetBtn.hasAttribute('disabled') ||
@@ -178,7 +201,14 @@
         const shareDisabled = shareBtn.hasAttribute('disabled') ||
                               shareBtn.getAttribute('aria-disabled') === 'true';
 
-        return retweetDisabled && shareDisabled;
+        if (!retweetDisabled || !shareDisabled) return false;
+
+        // Exclude protected/locked accounts: they have a lock icon in the
+        // User-Name area (data-testid="icon-lock").
+        const lockIcon = article.querySelector('[data-testid="icon-lock"]');
+        if (lockIcon) return false;
+
+        return true;
     }
 
     /**
