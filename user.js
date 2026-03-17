@@ -9,6 +9,7 @@
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=x.com
 // @match        https://x.com/*
 // @grant        GM_addStyle
+// @grant        GM_registerMenuCommand
 // @run-at       document-start
 // ==/UserScript==
 
@@ -19,7 +20,8 @@
     const DEBUG = true;
     // Set to true to show a subtle indicator instead of completely hiding the tweet.
     // Useful for debugging — you'll see a dimmed, collapsed version with a label.
-    const SOFT_HIDE = true;
+    // Togglable at runtime via Tampermonkey menu command.
+    let SOFT_HIDE = true;
 
     // ─── State ───────────────────────────────────────────────────────────────────
     // Session-level cache of user IDs confirmed as "blocked me".
@@ -324,6 +326,342 @@
         log('Initialized. Fetch interception active, MutationObserver watching.');
         log(`Blocklist size: ${blockedByUsers.size}`);
     }
+
+    // ─── Soft Hide Toggle ──────────────────────────────────────────────────────
+    // Re-applies hide treatment to all already-processed tweets when mode changes.
+
+    function reapplyHideMode() {
+        const articles = document.querySelectorAll('article[data-testid="tweet"][data-xbf-processed]');
+        articles.forEach(article => {
+            if (SOFT_HIDE) {
+                article.classList.remove('xbf-hidden');
+                article.classList.add('xbf-soft-hidden');
+                if (!article.querySelector('.xbf-label')) {
+                    const label = document.createElement('div');
+                    label.className = 'xbf-label';
+                    const name = getScreenNameFromArticle(article);
+                    label.textContent = `blocked-by @${name || '?'}`;
+                    article.style.position = 'relative';
+                    article.appendChild(label);
+                }
+            } else {
+                article.classList.remove('xbf-soft-hidden');
+                article.classList.add('xbf-hidden');
+                const label = article.querySelector('.xbf-label');
+                if (label) label.remove();
+            }
+        });
+    }
+
+    // ─── Panel UI ────────────────────────────────────────────────────────────────
+
+    GM_addStyle(`
+        #xbf-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.6);
+            z-index: 99998;
+            backdrop-filter: blur(4px);
+        }
+
+        #xbf-panel {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 500px;
+            max-width: 90vw;
+            max-height: 70vh;
+            background: #15202b;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 16px;
+            color: #f7f9f9;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            z-index: 99999;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
+            animation: xbf-slide-in 0.2s ease-out;
+        }
+
+        @keyframes xbf-slide-in {
+            from { opacity: 0; transform: translate(-50%, -50%) scale(0.95); }
+            to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+        }
+
+        #xbf-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 16px 20px 12px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            flex-shrink: 0;
+        }
+
+        #xbf-header h3 {
+            margin: 0;
+            font-size: 18px;
+            font-weight: 700;
+        }
+
+        #xbf-close {
+            background: transparent;
+            border: none;
+            color: #e7e9ea;
+            font-size: 20px;
+            cursor: pointer;
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: background 0.2s;
+            flex-shrink: 0;
+        }
+
+        #xbf-close:hover {
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        #xbf-search-container {
+            padding: 12px 20px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            flex-shrink: 0;
+        }
+
+        #xbf-search {
+            width: 100%;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            border-radius: 24px;
+            color: #f7f9f9;
+            padding: 10px 16px;
+            font-size: 14px;
+            outline: none;
+            transition: border-color 0.2s;
+            box-sizing: border-box;
+        }
+
+        #xbf-search:focus {
+            border-color: #1d9bf0;
+        }
+
+        #xbf-search::placeholder {
+            color: #71767b;
+        }
+
+        #xbf-stats {
+            padding: 8px 20px;
+            font-size: 12px;
+            color: #71767b;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            flex-shrink: 0;
+        }
+
+        #xbf-list {
+            overflow-y: auto;
+            flex: 1;
+            padding: 4px 0;
+        }
+
+        .xbf-entry {
+            display: flex;
+            align-items: center;
+            padding: 12px 20px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+            cursor: pointer;
+            transition: background 0.15s;
+            gap: 12px;
+        }
+
+        .xbf-entry:hover {
+            background: rgba(255, 255, 255, 0.03);
+        }
+
+        .xbf-entry-name {
+            flex: 1;
+            font-size: 14px;
+            color: #e7e9ea;
+            font-weight: 600;
+        }
+
+        .xbf-entry-source {
+            font-size: 11px;
+            color: #71767b;
+            font-family: "SF Mono", Monaco, Menlo, monospace;
+            flex-shrink: 0;
+        }
+
+        .xbf-entry-arrow {
+            color: #71767b;
+            font-size: 14px;
+            flex-shrink: 0;
+        }
+
+        #xbf-empty {
+            padding: 40px 20px;
+            text-align: center;
+            color: #71767b;
+            font-size: 14px;
+        }
+    `);
+
+    function showBlockedByPanel() {
+        // Remove existing panel if any
+        const existing = document.getElementById('xbf-overlay');
+        if (existing) existing.remove();
+
+        // Collect unique users, dedup by screen_name (lowercase)
+        const seen = new Map();
+        for (const [id, name] of blockedByUsers) {
+            const key = name.toLowerCase();
+            if (!seen.has(key)) {
+                seen.set(key, { screenName: name, source: id.startsWith('dom_') ? 'DOM' : 'API' });
+            }
+        }
+        let users = Array.from(seen.values()).sort((a, b) =>
+            a.screenName.toLowerCase().localeCompare(b.screenName.toLowerCase())
+        );
+
+        // Overlay
+        const overlay = document.createElement('div');
+        overlay.id = 'xbf-overlay';
+        overlay.addEventListener('click', (e) => {
+            if (e.target === overlay) overlay.remove();
+        });
+
+        // Panel
+        const panel = document.createElement('div');
+        panel.id = 'xbf-panel';
+
+        // Header
+        const header = document.createElement('div');
+        header.id = 'xbf-header';
+
+        const title = document.createElement('h3');
+        title.textContent = 'Blocked-by Users';
+
+        const closeBtn = document.createElement('button');
+        closeBtn.id = 'xbf-close';
+        closeBtn.innerHTML = '&times;';
+        closeBtn.addEventListener('click', () => overlay.remove());
+
+        header.appendChild(title);
+        header.appendChild(closeBtn);
+
+        // Search
+        const searchContainer = document.createElement('div');
+        searchContainer.id = 'xbf-search-container';
+
+        const searchInput = document.createElement('input');
+        searchInput.id = 'xbf-search';
+        searchInput.type = 'text';
+        searchInput.placeholder = 'Search by username...';
+
+        searchContainer.appendChild(searchInput);
+
+        // Stats
+        const stats = document.createElement('div');
+        stats.id = 'xbf-stats';
+        stats.textContent = `${users.length} user${users.length !== 1 ? 's' : ''} detected this session`;
+
+        // List
+        const list = document.createElement('div');
+        list.id = 'xbf-list';
+
+        function renderList(filtered) {
+            list.innerHTML = '';
+            if (filtered.length === 0) {
+                const empty = document.createElement('div');
+                empty.id = 'xbf-empty';
+                empty.textContent = users.length === 0
+                    ? 'No blocked-by users detected yet'
+                    : 'No matching users';
+                list.appendChild(empty);
+                return;
+            }
+
+            for (const user of filtered) {
+                const row = document.createElement('div');
+                row.className = 'xbf-entry';
+                row.title = `Open @${user.screenName} profile`;
+
+                const nameEl = document.createElement('div');
+                nameEl.className = 'xbf-entry-name';
+                nameEl.textContent = `@${user.screenName}`;
+
+                const sourceEl = document.createElement('div');
+                sourceEl.className = 'xbf-entry-source';
+                sourceEl.textContent = user.source;
+
+                const arrow = document.createElement('div');
+                arrow.className = 'xbf-entry-arrow';
+                arrow.textContent = '\u203A'; // single right-pointing angle quotation mark
+
+                row.addEventListener('click', () => {
+                    window.open(`https://x.com/${user.screenName}`, '_blank');
+                });
+
+                row.appendChild(nameEl);
+                row.appendChild(sourceEl);
+                row.appendChild(arrow);
+                list.appendChild(row);
+            }
+        }
+
+        renderList(users);
+
+        searchInput.addEventListener('input', () => {
+            const query = searchInput.value.toLowerCase().trim();
+            if (!query) {
+                renderList(users);
+                stats.textContent = `${users.length} user${users.length !== 1 ? 's' : ''} detected this session`;
+                return;
+            }
+            const filtered = users.filter(u => u.screenName.toLowerCase().includes(query));
+            renderList(filtered);
+            stats.textContent = `${filtered.length} of ${users.length} user${users.length !== 1 ? 's' : ''}`;
+        });
+
+        // Keyboard: Escape to close
+        const onKeyDown = (e) => {
+            if (e.key === 'Escape') {
+                overlay.remove();
+                document.removeEventListener('keydown', onKeyDown);
+            }
+        };
+        document.addEventListener('keydown', onKeyDown);
+
+        // Assemble
+        panel.appendChild(header);
+        panel.appendChild(searchContainer);
+        panel.appendChild(stats);
+        panel.appendChild(list);
+        overlay.appendChild(panel);
+        document.body.appendChild(overlay);
+
+        searchInput.focus();
+    }
+
+    // ─── Menu Commands ───────────────────────────────────────────────────────────
+
+    function registerMenuCommands() {
+        GM_registerMenuCommand('View Blocked-by Users', showBlockedByPanel);
+        GM_registerMenuCommand(
+            `Soft Hide: ${SOFT_HIDE ? 'ON' : 'OFF'} (click to toggle)`,
+            () => {
+                SOFT_HIDE = !SOFT_HIDE;
+                reapplyHideMode();
+                log(`Soft hide ${SOFT_HIDE ? 'enabled' : 'disabled'}`);
+            }
+        );
+    }
+
+    registerMenuCommands();
 
     init();
 })();
