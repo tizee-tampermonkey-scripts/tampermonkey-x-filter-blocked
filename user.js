@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         X Block Filter
 // @namespace    https://github.com/tizee-tampermonkey-scripts/tampermonkey-x-filter-blocked
-// @version      1.1.0
-// @description  Automatically hides tweets from users who have blocked you on X/Twitter. Detects blocked-by status via fetch interception (GraphQL response) and DOM fallback (disabled action buttons). Maintains a session-local blocklist.
+// @version      1.2.0
+// @description  Automatically hides tweets from users who have blocked you on X/Twitter. Detects blocked-by status via fetch interception (GraphQL response) and DOM fallback (disabled action buttons). Persists blocklist and settings across sessions.
 // @author       tizee
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=x.com
 // @downloadURL  https://raw.githubusercontent.com/tizee-tampermonkey-scripts/tampermonkey-x-filter-blocked/refs/heads/main/user.js
@@ -10,6 +10,8 @@
 // @match        https://x.com/*
 // @grant        GM_addStyle
 // @grant        GM_registerMenuCommand
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @run-at       document-start
 // @license      MIT
 // ==/UserScript==
@@ -22,15 +24,26 @@
     // Set to true to show a subtle indicator instead of completely hiding the tweet.
     // Useful for debugging — you'll see a dimmed, collapsed version with a label.
     // Togglable at runtime via Tampermonkey menu command.
-    let SOFT_HIDE = true;
+    // Persisted across sessions via GM_getValue/GM_setValue.
+    let SOFT_HIDE = GM_getValue('softHide', true);
+
+    // ─── Storage Keys ────────────────────────────────────────────────────────────
+    const STORAGE_KEY_SOFT_HIDE = 'softHide';
+    const STORAGE_KEY_BLOCKED_USERS = 'blockedByUsers';
 
     // ─── State ───────────────────────────────────────────────────────────────────
-    // Session-level cache of user IDs confirmed as "blocked me".
+    // Persistent cache of user IDs confirmed as "blocked me".
     // Keyed by rest_id (string), value is screen_name for logging.
-    const blockedByUsers = new Map();
+    // Loaded from GM storage on startup, updated incrementally as new users are found.
+    const blockedByUsers = new Map(GM_getValue(STORAGE_KEY_BLOCKED_USERS, []));
 
     function log(...args) {
         if (DEBUG) console.debug('[X-Block-Filter]', ...args);
+    }
+
+    /** Saves the current blockedByUsers map to persistent GM storage. */
+    function persistBlockedUsers() {
+        GM_setValue(STORAGE_KEY_BLOCKED_USERS, Array.from(blockedByUsers.entries()));
     }
 
     // ─── Styles ──────────────────────────────────────────────────────────────────
@@ -140,6 +153,7 @@
                     const name = user.core?.screen_name || user.legacy?.screen_name || 'unknown';
                     if (!blockedByUsers.has(id)) {
                         blockedByUsers.set(id, name);
+                        persistBlockedUsers();
                         log(`Discovered blocked-by user: @${name} (${id}) [like_restricted=${likeRestricted}, blocked_by=${blockedBy}]`);
                         // Immediately try to hide any already-rendered tweets from this user.
                         hideExistingTweetsFromUser(name);
@@ -156,6 +170,7 @@
             const name = obj.core?.screen_name || obj.legacy?.screen_name || 'unknown';
             if (!blockedByUsers.has(id)) {
                 blockedByUsers.set(id, name);
+                persistBlockedUsers();
                 log(`Discovered blocked-by user (via perspectives): @${name} (${id})`);
                 hideExistingTweetsFromUser(name);
             }
@@ -283,6 +298,7 @@
                 const placeholder_id = `dom_${screenName}`;
                 if (!blockedByUsers.has(placeholder_id)) {
                     blockedByUsers.set(placeholder_id, screenName);
+                    persistBlockedUsers();
                     log(`Added @${screenName} to blocklist via DOM detection`);
                 }
             }
@@ -354,7 +370,7 @@
         processExistingTweets();
 
         log('Initialized. Fetch interception active, MutationObserver watching.');
-        log(`Blocklist size: ${blockedByUsers.size}`);
+        log(`Blocklist size: ${blockedByUsers.size} (loaded from storage)`);
     }
 
     // ─── Soft Hide Toggle ──────────────────────────────────────────────────────
@@ -435,6 +451,28 @@
             margin: 0;
             font-size: 18px;
             font-weight: 700;
+        }
+
+        #xbf-header-actions {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        #xbf-clear {
+            background: transparent;
+            border: 1px solid rgba(231, 76, 60, 0.4);
+            color: #e74c3c;
+            font-size: 12px;
+            cursor: pointer;
+            padding: 4px 12px;
+            border-radius: 16px;
+            transition: background 0.2s;
+            flex-shrink: 0;
+        }
+
+        #xbf-clear:hover {
+            background: rgba(231, 76, 60, 0.15);
         }
 
         #xbf-close {
@@ -575,13 +613,32 @@
         const title = document.createElement('h3');
         title.textContent = 'Blocked-by Users';
 
+        const headerActions = document.createElement('div');
+        headerActions.id = 'xbf-header-actions';
+
+        const clearBtn = document.createElement('button');
+        clearBtn.id = 'xbf-clear';
+        clearBtn.textContent = 'Clear List';
+        clearBtn.addEventListener('click', () => {
+            if (!confirm('Clear all blocked-by users from storage? They will be re-detected as you browse.')) return;
+            blockedByUsers.clear();
+            persistBlockedUsers();
+            users = [];
+            renderList([]);
+            stats.textContent = '0 users detected';
+            log('Cleared persisted blocked-by user list');
+        });
+
         const closeBtn = document.createElement('button');
         closeBtn.id = 'xbf-close';
         closeBtn.innerHTML = '&times;';
         closeBtn.addEventListener('click', () => overlay.remove());
 
+        headerActions.appendChild(clearBtn);
+        headerActions.appendChild(closeBtn);
+
         header.appendChild(title);
-        header.appendChild(closeBtn);
+        header.appendChild(headerActions);
 
         // Search
         const searchContainer = document.createElement('div');
@@ -597,7 +654,7 @@
         // Stats
         const stats = document.createElement('div');
         stats.id = 'xbf-stats';
-        stats.textContent = `${users.length} user${users.length !== 1 ? 's' : ''} detected this session`;
+        stats.textContent = `${users.length} user${users.length !== 1 ? 's' : ''} detected`;
 
         // List
         const list = document.createElement('div');
@@ -649,7 +706,7 @@
             const query = searchInput.value.toLowerCase().trim();
             if (!query) {
                 renderList(users);
-                stats.textContent = `${users.length} user${users.length !== 1 ? 's' : ''} detected this session`;
+                stats.textContent = `${users.length} user${users.length !== 1 ? 's' : ''} detected`;
                 return;
             }
             const filtered = users.filter(u => u.screenName.toLowerCase().includes(query));
@@ -685,6 +742,7 @@
             `Soft Hide: ${SOFT_HIDE ? 'ON' : 'OFF'} (click to toggle)`,
             () => {
                 SOFT_HIDE = !SOFT_HIDE;
+                GM_setValue(STORAGE_KEY_SOFT_HIDE, SOFT_HIDE);
                 reapplyHideMode();
                 log(`Soft hide ${SOFT_HIDE ? 'enabled' : 'disabled'}`);
             }

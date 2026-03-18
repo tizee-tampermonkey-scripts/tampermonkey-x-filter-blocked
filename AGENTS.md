@@ -40,11 +40,12 @@ For tweets that slip through (e.g., already rendered before fetch interception f
 - **`@run-at document-start` is required.** The fetch hook must be installed before X's scripts execute their first API call. Changing this to `document-idle` or `document-end` will break Layer 1.
 - **`GM_addStyle` grant is required.** Used to inject CSS for hide/soft-hide treatment and panel UI.
 - **`GM_registerMenuCommand` grant is required.** Used for Tampermonkey menu entries (view panel, toggle soft hide).
-- **Session-only state.** The `blockedByUsers` Map resets on page reload. There is no persistent storage.
+- **`GM_getValue`/`GM_setValue` grants are required.** Used to persist the blocked-by user list and soft-hide preference across sessions.
+- **Persistent state.** The `blockedByUsers` Map and `SOFT_HIDE` preference are stored via `GM_setValue` and restored on page load via `GM_getValue`. The panel includes a "Clear List" button to reset persisted data.
 
 ## Panel UI
 
-An overlay panel (opened via Tampermonkey menu > "View Blocked-by Users") displays all blocked-by users detected in the current session. Each entry shows `@screen_name` and detection source (API / DOM). Clicking an entry opens the user's profile in a new tab. Supports search filtering. CSS class prefix: `xbf-`.
+An overlay panel (opened via Tampermonkey menu > "View Blocked-by Users") displays all blocked-by users detected across sessions. Each entry shows `@screen_name` and detection source (API / DOM). Clicking an entry opens the user's profile in a new tab. Supports search filtering. Includes a "Clear List" button to reset the persisted blocklist. CSS class prefix: `xbf-`.
 
 ## Configuration
 
@@ -53,6 +54,6 @@ Two flags at the top of the IIFE (lines 19-22):
 | Flag | Default | Effect |
 |------|---------|--------|
 | `DEBUG` | `true` | Enables `console.debug` logging with `[X-Block-Filter]` prefix |
-| `SOFT_HIDE` | `true` | Dims + collapses tweets instead of fully hiding them (`display: none`). Togglable at runtime via Tampermonkey menu. |
+| `SOFT_HIDE` | `true` | Dims + collapses tweets instead of fully hiding them (`display: none`). Togglable at runtime via Tampermonkey menu. Persisted across sessions. |
 
-`SOFT_HIDE` can be toggled at runtime via Tampermonkey menu > "Soft Hide: ON/OFF". Toggling calls `reapplyHideMode()` which swaps CSS classes on all already-processed tweets.
+`SOFT_HIDE` can be toggled at runtime via Tampermonkey menu > "Soft Hide: ON/OFF". Toggling calls `reapplyHideMode()` which swaps CSS classes on all already-processed tweets. The preference is persisted via `GM_setValue` and restored on next page load.
